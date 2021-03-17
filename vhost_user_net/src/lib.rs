@@ -8,7 +8,7 @@
 
 extern crate log;
 extern crate net_util;
-extern crate vhost_rs;
+extern crate vhost;
 extern crate vhost_user_backend;
 
 use libc::{self, EFD_NONBLOCK};
@@ -24,8 +24,8 @@ use std::os::unix::io::AsRawFd;
 use std::process;
 use std::sync::{Arc, Mutex, RwLock};
 use std::vec::Vec;
-use vhost_rs::vhost_user::message::*;
-use vhost_rs::vhost_user::{Error as VhostUserError, Listener};
+use vhost::vhost_user::message::*;
+use vhost::vhost_user::{Error as VhostUserError, Listener};
 use vhost_user_backend::{VhostUserBackend, VhostUserDaemon, Vring, VringWorker};
 use virtio_bindings::bindings::virtio_net::*;
 use virtio_bindings::bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
@@ -70,6 +70,8 @@ pub enum Error {
     SocketParameterMissing,
     /// Underlying QueuePair error
     NetQueuePair(net_util::NetQueuePairError),
+    /// Failed registering the TAP listener
+    RegisterTapListener(io::Error),
 }
 
 pub const SYNTAX: &str = "vhost-user-net backend parameters \
@@ -186,7 +188,9 @@ impl VhostUserBackend for VhostUserNetBackend {
     }
 
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
-        VhostUserProtocolFeatures::MQ | VhostUserProtocolFeatures::REPLY_ACK
+        VhostUserProtocolFeatures::MQ
+            | VhostUserProtocolFeatures::REPLY_ACK
+            | VhostUserProtocolFeatures::CONFIGURE_MEM_SLOTS
     }
 
     fn set_event_idx(&mut self, _enabled: bool) {}
@@ -212,15 +216,15 @@ impl VhostUserBackend for VhostUserNetBackend {
         let mut thread = self.threads[thread_id].lock().unwrap();
         match device_event {
             0 => {
-                let mut vring = vrings[0].write().unwrap();
-                if thread
-                    .net
-                    .resume_rx(&mut vring.mut_queue())
-                    .map_err(Error::NetQueuePair)?
-                {
-                    vring
-                        .signal_used_queue()
-                        .map_err(Error::FailedSignalingUsedQueue)?
+                if !thread.net.rx_tap_listening {
+                    net_util::register_listener(
+                        thread.net.epoll_fd.unwrap(),
+                        thread.net.tap.as_raw_fd(),
+                        epoll::Events::EPOLLIN,
+                        u64::from(thread.net.tap_event_id),
+                    )
+                    .map_err(Error::RegisterTapListener)?;
+                    thread.net.rx_tap_listening = true;
                 }
             }
             1 => {
@@ -239,7 +243,7 @@ impl VhostUserBackend for VhostUserNetBackend {
                 let mut vring = vrings[0].write().unwrap();
                 if thread
                     .net
-                    .process_rx_tap(&mut vring.mut_queue())
+                    .process_rx(&mut vring.mut_queue())
                     .map_err(Error::NetQueuePair)?
                 {
                     vring

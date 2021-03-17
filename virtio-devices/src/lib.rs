@@ -21,11 +21,12 @@ extern crate serde;
 #[macro_use]
 extern crate serde_derive;
 extern crate serde_json;
-extern crate vhost_rs;
+extern crate vhost;
 extern crate virtio_bindings;
 extern crate vm_device;
 extern crate vm_memory;
 
+use std::convert::TryInto;
 use std::io;
 
 #[macro_use]
@@ -39,6 +40,7 @@ pub mod mem;
 pub mod net;
 pub mod net_util;
 mod pmem;
+mod rate_limiter;
 mod rng;
 pub mod seccomp_filters;
 pub mod transport;
@@ -59,6 +61,7 @@ pub use self::pmem::*;
 pub use self::rng::*;
 pub use self::vsock::*;
 pub use self::watchdog::*;
+use vm_memory::{GuestAddress, GuestMemory};
 use vm_virtio::{queue::*, VirtioDeviceType};
 
 const DEVICE_INIT: u32 = 0x00;
@@ -84,16 +87,18 @@ pub enum ActivateError {
     CloneKillEventFd,
     /// Failed to create Vhost-user interrupt eventfd
     VhostIrqCreate,
-    /// Failed to setup vhost-user daemon.
-    VhostUserSetup(vhost_user::Error),
-    /// Failed to setup vhost-user daemon.
+    /// Failed to setup vhost-user-fs daemon.
+    VhostUserFsSetup(vhost_user::Error),
+    /// Failed to setup vhost-user-net daemon.
     VhostUserNetSetup(vhost_user::Error),
-    /// Failed to setup vhost-user daemon.
+    /// Failed to setup vhost-user-blk daemon.
     VhostUserBlkSetup(vhost_user::Error),
     /// Failed to reset vhost-user daemon.
     VhostUserReset(vhost_user::Error),
     /// Cannot create seccomp filter
     CreateSeccompFilter(seccomp::SeccompError),
+    /// Cannot create rate limiter
+    CreateRateLimiter(std::io::Error),
 }
 
 pub type ActivateResult = std::result::Result<(), ActivateError>;
@@ -118,10 +123,58 @@ pub enum Error {
     EpollWait(io::Error),
     FailedSignalingDriver(io::Error),
     VhostUserUpdateMemory(vhost_user::Error),
+    VhostUserAddMemoryRegion(vhost_user::Error),
     EventfdError(io::Error),
     SetShmRegionsNotSupported,
     EpollHander(String),
     NoMemoryConfigured,
     NetQueuePair(::net_util::NetQueuePairError),
     ApplySeccompFilter(seccomp::Error),
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct TokenBucketConfig {
+    pub size: u64,
+    pub one_time_burst: Option<u64>,
+    pub refill_time: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimiterConfig {
+    pub bandwidth: Option<TokenBucketConfig>,
+    pub ops: Option<TokenBucketConfig>,
+}
+
+impl TryInto<rate_limiter::RateLimiter> for RateLimiterConfig {
+    type Error = io::Error;
+
+    fn try_into(self) -> std::result::Result<rate_limiter::RateLimiter, Self::Error> {
+        let bw = self.bandwidth.unwrap_or_default();
+        let ops = self.ops.unwrap_or_default();
+        rate_limiter::RateLimiter::new(
+            bw.size,
+            bw.one_time_burst.unwrap_or(0),
+            bw.refill_time,
+            ops.size,
+            ops.one_time_burst.unwrap_or(0),
+            ops.refill_time,
+        )
+    }
+}
+
+/// Convert an absolute address into an address space (GuestMemory)
+/// to a host pointer and verify that the provided size define a valid
+/// range within a single memory region.
+/// Return None if it is out of bounds or if addr+size overlaps a single region.
+pub fn get_host_address_range<M: GuestMemory>(
+    mem: &M,
+    addr: GuestAddress,
+    size: usize,
+) -> Option<*mut u8> {
+    if mem.check_range(addr, size) {
+        Some(mem.get_host_address(addr).unwrap())
+    } else {
+        None
+    }
 }

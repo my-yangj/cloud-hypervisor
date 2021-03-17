@@ -30,8 +30,7 @@ mod tests {
     use std::sync::mpsc::Receiver;
     use std::sync::{mpsc, Mutex};
     use std::thread;
-    use tempdir::TempDir;
-    use tempfile::NamedTempFile;
+    use vmm_sys_util::{tempdir::TempDir, tempfile::TempFile};
     #[cfg_attr(target_arch = "aarch64", allow(unused_imports))]
     use wait_timeout::ChildExt;
 
@@ -89,6 +88,8 @@ mod tests {
     const FOCAL_IMAGE_NAME: &str = "focal-server-cloudimg-amd64-custom-20210106-1.raw";
     #[cfg(target_arch = "x86_64")]
     const FOCAL_SGX_IMAGE_NAME: &str = "focal-server-cloudimg-amd64-sgx.raw";
+    #[cfg(target_arch = "x86_64")]
+    const FOCAL_NVIDIA_IMAGE_NAME: &str = "focal-server-cloudimg-amd64-nvidia.raw";
     #[cfg(target_arch = "aarch64")]
     const BIONIC_IMAGE_NAME: &str = "bionic-server-cloudimg-arm64.raw";
     #[cfg(target_arch = "aarch64")]
@@ -103,9 +104,16 @@ mod tests {
     const FOCAL_IMAGE_NAME_VHD: &str = "focal-server-cloudimg-amd64-custom-20210106-1.vhd";
     #[cfg(target_arch = "x86_64")]
     const WINDOWS_IMAGE_NAME: &str = "windows-server-2019.raw";
+    #[cfg(target_arch = "x86_64")]
+    const OVMF_NAME: &str = "OVMF-4b47d0c6c8.fd";
 
     const DIRECT_KERNEL_BOOT_CMDLINE: &str =
         "root=/dev/vda1 console=hvc0 rw systemd.journald.forward_to_console=1";
+
+    #[cfg(target_arch = "x86_64")]
+    const GREP_SERIAL_IRQ_CMD: &str = "cat /proc/interrupts | grep 'IO-APIC' | grep -c 'ttyS0'";
+    #[cfg(target_arch = "aarch64")]
+    const GREP_SERIAL_IRQ_CMD: &str = "cat /proc/interrupts | grep 'GICv3' | grep -c 'uart-pl011'";
 
     const PIPE_SIZE: i32 = 32 << 20;
 
@@ -251,9 +259,9 @@ mod tests {
     impl DiskConfig for UbuntuDiskConfig {
         fn prepare_cloudinit(&self, tmp_dir: &TempDir, network: &GuestNetworkConfig) -> String {
             let cloudinit_file_path =
-                String::from(tmp_dir.path().join("cloudinit").to_str().unwrap());
+                String::from(tmp_dir.as_path().join("cloudinit").to_str().unwrap());
 
-            let cloud_init_directory = tmp_dir.path().join("cloud-init").join("ubuntu");
+            let cloud_init_directory = tmp_dir.as_path().join("cloud-init").join("ubuntu");
 
             fs::create_dir_all(&cloud_init_directory)
                 .expect("Expect creating cloud-init directory to succeed");
@@ -344,7 +352,7 @@ mod tests {
             let mut osdisk_base_path = workload_path;
             osdisk_base_path.push(&self.image_name);
 
-            let osdisk_path = String::from(tmp_dir.path().join("osdisk.img").to_str().unwrap());
+            let osdisk_path = String::from(tmp_dir.as_path().join("osdisk.img").to_str().unwrap());
             let cloudinit_path = self.prepare_cloudinit(tmp_dir, network);
 
             rate_limited_copy(osdisk_base_path, &osdisk_path)
@@ -380,7 +388,7 @@ mod tests {
                 >> 9;
 
             let snapshot_cow_path =
-                String::from(tmp_dir.path().join("snapshot_cow").to_str().unwrap());
+                String::from(tmp_dir.as_path().join("snapshot_cow").to_str().unwrap());
 
             // Create and truncate CoW file for device mapper
             let cow_file_size: u64 = 1 << 30;
@@ -403,7 +411,7 @@ mod tests {
                 .trim()
                 .to_string();
 
-            let random_extension = tmp_dir.path().file_name().unwrap();
+            let random_extension = tmp_dir.as_path().file_name().unwrap();
             let windows_snapshot_cow = format!(
                 "windows-snapshot-cow-{}",
                 random_extension.to_str().unwrap()
@@ -477,7 +485,7 @@ mod tests {
         let virtiofsd_path = String::from(virtiofsd_path.to_str().unwrap());
 
         let virtiofsd_socket_path =
-            String::from(tmp_dir.path().join("virtiofs.sock").to_str().unwrap());
+            String::from(tmp_dir.as_path().join("virtiofs.sock").to_str().unwrap());
 
         // Start the daemon
         let child = Command::new(virtiofsd_path.as_str())
@@ -505,7 +513,7 @@ mod tests {
         let virtiofsd_path = String::from(virtiofsd_path.to_str().unwrap());
 
         let virtiofsd_socket_path =
-            String::from(tmp_dir.path().join("virtiofs.sock").to_str().unwrap());
+            String::from(tmp_dir.as_path().join("virtiofs.sock").to_str().unwrap());
 
         // Start the daemon
         let child = Command::new(virtiofsd_path.as_str())
@@ -533,7 +541,7 @@ mod tests {
         blk_file_path.push(blk_img);
         let blk_file_path = String::from(blk_file_path.to_str().unwrap());
 
-        let vubd_socket_path = String::from(tmp_dir.path().join("vub.sock").to_str().unwrap());
+        let vubd_socket_path = String::from(tmp_dir.as_path().join("vub.sock").to_str().unwrap());
 
         // Start the daemon
         let child = Command::new(clh_command("vhost_user_block"))
@@ -554,13 +562,13 @@ mod tests {
     }
 
     fn temp_vsock_path(tmp_dir: &TempDir) -> String {
-        String::from(tmp_dir.path().join("vsock").to_str().unwrap())
+        String::from(tmp_dir.as_path().join("vsock").to_str().unwrap())
     }
 
     fn temp_api_path(tmp_dir: &TempDir) -> String {
         String::from(
             tmp_dir
-                .path()
+                .as_path()
                 .join("cloud-hypervisor.sock")
                 .to_str()
                 .unwrap(),
@@ -569,7 +577,7 @@ mod tests {
 
     // Creates the directory and returns the path.
     fn temp_snapshot_dir_path(tmp_dir: &TempDir) -> String {
-        let snapshot_dir = String::from(tmp_dir.path().join("snapshot").to_str().unwrap());
+        let snapshot_dir = String::from(tmp_dir.as_path().join("snapshot").to_str().unwrap());
         std::fs::create_dir(&snapshot_dir).unwrap();
         snapshot_dir
     }
@@ -596,7 +604,8 @@ mod tests {
         tap: Option<&str>,
         num_queues: usize,
     ) -> (std::process::Child, String) {
-        let vunet_socket_path = String::from(tmp_dir.path().join("vunet.sock").to_str().unwrap());
+        let vunet_socket_path =
+            String::from(tmp_dir.as_path().join("vunet.sock").to_str().unwrap());
 
         // Start the daemon
         let net_params = if let Some(tap_str) = tap {
@@ -807,7 +816,7 @@ mod tests {
 
     impl<'a> Guest<'a> {
         fn new_from_ip_range(disk_config: &'a mut dyn DiskConfig, class: &str, id: u8) -> Self {
-            let tmp_dir = TempDir::new("ch").unwrap();
+            let tmp_dir = TempDir::new_with_prefix("/tmp/ch").unwrap();
 
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
@@ -2008,11 +2017,11 @@ mod tests {
 
         let kernel_path = direct_kernel_boot_path();
 
-        let mut pmem_temp_file = NamedTempFile::new().unwrap();
-        pmem_temp_file.as_file_mut().set_len(128 << 20).unwrap();
+        let pmem_temp_file = TempFile::new().unwrap();
+        pmem_temp_file.as_file().set_len(128 << 20).unwrap();
 
         std::process::Command::new("mkfs.ext4")
-            .arg(pmem_temp_file.path())
+            .arg(pmem_temp_file.as_path())
             .output()
             .expect("Expect creating disk image to succeed");
 
@@ -2027,7 +2036,7 @@ mod tests {
                 "--pmem",
                 format!(
                     "file={}{}{}",
-                    pmem_temp_file.path().to_str().unwrap(),
+                    pmem_temp_file.as_path().to_str().unwrap(),
                     if specify_size { ",size=128M" } else { "" },
                     if discard_writes {
                         ",discard_writes=on"
@@ -2710,7 +2719,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_power_button() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -3556,20 +3564,13 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_serial_off() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
-
-            let mut kernel_path = workload_path;
-            kernel_path.push("bzImage");
-
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
-                .args(&["--kernel", kernel_path.to_str().unwrap()])
+                .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                 .default_disks()
                 .default_net()
@@ -3584,7 +3585,7 @@ mod tests {
                 // Test that there is no ttyS0
                 assert_eq!(
                     guest
-                        .ssh_command("cat /proc/interrupts | grep 'IO-APIC' | grep -c 'ttyS0'")
+                        .ssh_command(GREP_SERIAL_IRQ_CMD)
                         .unwrap()
                         .trim()
                         .parse::<u32>()
@@ -3604,13 +3605,18 @@ mod tests {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
             let mut cmd = GuestCommand::new(&guest);
+            #[cfg(target_arch = "x86_64")]
+            let console_str: &str = "console=ttyS0";
+            #[cfg(target_arch = "aarch64")]
+            let console_str: &str = "console=ttyAMA0";
+
             cmd.args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
                 .args(&[
                     "--cmdline",
                     DIRECT_KERNEL_BOOT_CMDLINE
-                        .replace("console=hvc0 ", "console=ttyS0")
+                        .replace("console=hvc0 ", console_str)
                         .as_str(),
                 ])
                 .default_disks()
@@ -3624,11 +3630,10 @@ mod tests {
             let r = std::panic::catch_unwind(|| {
                 guest.wait_vm_boot(None).unwrap();
 
-                #[cfg(target_arch = "x86_64")]
                 // Test that there is a ttyS0
                 assert_eq!(
                     guest
-                        .ssh_command("cat /proc/interrupts | grep 'IO-APIC' | grep -c 'ttyS0'")
+                        .ssh_command(GREP_SERIAL_IRQ_CMD)
                         .unwrap()
                         .trim()
                         .parse::<u32>()
@@ -3649,7 +3654,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_serial_tty() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -3659,6 +3663,11 @@ mod tests {
 
             let kernel_path = direct_kernel_boot_path();
 
+            #[cfg(target_arch = "x86_64")]
+            let console_str: &str = "console=ttyS0";
+            #[cfg(target_arch = "aarch64")]
+            let console_str: &str = "console=ttyAMA0";
+
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
@@ -3666,7 +3675,7 @@ mod tests {
                 .args(&[
                     "--cmdline",
                     DIRECT_KERNEL_BOOT_CMDLINE
-                        .replace("console=hvc0 ", "console=ttyS0")
+                        .replace("console=hvc0 ", console_str)
                         .as_str(),
                 ])
                 .default_disks()
@@ -3683,7 +3692,7 @@ mod tests {
                 // Test that there is a ttyS0
                 assert_eq!(
                     guest
-                        .ssh_command("cat /proc/interrupts | grep 'IO-APIC' | grep -c 'ttyS0'")
+                        .ssh_command(GREP_SERIAL_IRQ_CMD)
                         .unwrap()
                         .trim()
                         .parse::<u32>()
@@ -3707,12 +3716,16 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_serial_file() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
 
-            let serial_path = guest.tmp_dir.path().join("/tmp/serial-output");
+            let serial_path = guest.tmp_dir.as_path().join("/tmp/serial-output");
+            #[cfg(target_arch = "x86_64")]
+            let console_str: &str = "console=ttyS0";
+            #[cfg(target_arch = "aarch64")]
+            let console_str: &str = "console=ttyAMA0";
+
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
@@ -3720,7 +3733,7 @@ mod tests {
                 .args(&[
                     "--cmdline",
                     DIRECT_KERNEL_BOOT_CMDLINE
-                        .replace("console=hvc0 ", "console=ttyS0")
+                        .replace("console=hvc0 ", console_str)
                         .as_str(),
                 ])
                 .default_disks()
@@ -3739,7 +3752,7 @@ mod tests {
                 // Test that there is a ttyS0
                 assert_eq!(
                     guest
-                        .ssh_command("cat /proc/interrupts | grep 'IO-APIC' | grep -c 'ttyS0'")
+                        .ssh_command(GREP_SERIAL_IRQ_CMD)
                         .unwrap()
                         .trim()
                         .parse::<u32>()
@@ -3909,7 +3922,7 @@ mod tests {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
 
-            let console_path = guest.tmp_dir.path().join("/tmp/console-output");
+            let console_path = guest.tmp_dir.as_path().join("/tmp/console-output");
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
@@ -5314,14 +5327,14 @@ mod tests {
                     0
                 );
 
-                let mut pmem_temp_file = NamedTempFile::new().unwrap();
-                pmem_temp_file.as_file_mut().set_len(128 << 20).unwrap();
+                let pmem_temp_file = TempFile::new().unwrap();
+                pmem_temp_file.as_file().set_len(128 << 20).unwrap();
                 let (cmd_success, cmd_output) = remote_command_w_output(
                     &api_socket,
                     "add-pmem",
                     Some(&format!(
                         "file={},id=test0",
-                        pmem_temp_file.path().to_str().unwrap()
+                        pmem_temp_file.as_path().to_str().unwrap()
                     )),
                 );
                 assert!(cmd_success);
@@ -6112,7 +6125,7 @@ mod tests {
             workload_path.push("workloads");
 
             let mut ovmf_path = workload_path.clone();
-            ovmf_path.push("OVMF.fd");
+            ovmf_path.push(OVMF_NAME);
 
             let mut osdisk_path = workload_path;
             osdisk_path.push(WINDOWS_IMAGE_NAME.to_string());
@@ -6161,12 +6174,12 @@ mod tests {
             let mut windows = WindowsDiskConfig::new(WINDOWS_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut windows);
 
-            let tmp_dir = TempDir::new("ch").unwrap();
+            let tmp_dir = TempDir::new_with_prefix("/tmp/ch").unwrap();
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
             let mut ovmf_path = workload_path.clone();
-            ovmf_path.push("OVMF.fd");
+            ovmf_path.push(OVMF_NAME);
 
             let mut osdisk_path = workload_path;
             osdisk_path.push(WINDOWS_IMAGE_NAME.to_string());
@@ -6304,6 +6317,67 @@ mod tests {
                         establish secure channel.\nSucceed to exchange \
                         secure message...\nSucceed to close Session..."
                     ));
+            });
+
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+
+            handle_child_output(r, &output);
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    mod vfio {
+        use crate::tests::*;
+
+        #[test]
+        fn test_nvidia_card() {
+            let mut focal = UbuntuDiskConfig::new(FOCAL_NVIDIA_IMAGE_NAME.to_string());
+            let guest = Guest::new(&mut focal);
+
+            let mut child = GuestCommand::new(&guest)
+                .args(&["--cpus", "boot=4"])
+                .args(&["--memory", "size=4G"])
+                .args(&["--kernel", guest.fw_path.as_str()])
+                .args(&["--device", "path=/sys/bus/pci/devices/0000:31:00.0/"])
+                .default_disks()
+                .default_net()
+                .capture_output()
+                .spawn()
+                .unwrap();
+
+            let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
+                // Run CUDA sample to validate it can find the device
+                let device_query_result = guest
+                    .ssh_command(
+                        "sudo /root/NVIDIA_CUDA-11.2_Samples/bin/x86_64/linux/release/deviceQuery",
+                    )
+                    .unwrap();
+                assert!(device_query_result.contains("Detected 1 CUDA Capable device"));
+                assert!(device_query_result.contains("Device 0: \"Tesla T4\""));
+                assert!(device_query_result.contains("Result = PASS"));
+
+                // Run NVIDIA DCGM Diagnostics to validate the device is functional
+                assert_eq!(
+                    guest
+                        .ssh_command("sudo nv-hostengine && echo ok")
+                        .unwrap()
+                        .trim(),
+                    "ok"
+                );
+                assert!(guest
+                    .ssh_command("sudo dcgmi discovery -l")
+                    .unwrap()
+                    .contains("Name: Tesla T4"));
+                assert_eq!(
+                    guest
+                        .ssh_command("sudo dcgmi diag -r 'diagnostic' | grep Pass | wc -l")
+                        .unwrap()
+                        .trim(),
+                    "10"
+                );
             });
 
             let _ = child.kill();

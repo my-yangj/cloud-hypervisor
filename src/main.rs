@@ -17,6 +17,7 @@ extern crate event_monitor;
 use clap::{App, Arg, ArgGroup, ArgMatches};
 use libc::EFD_NONBLOCK;
 use log::LevelFilter;
+use option_parser::OptionParser;
 use seccomp::SeccompAction;
 use signal_hook::{
     consts::SIGSYS,
@@ -321,9 +322,9 @@ fn create_app<'a, 'b>(
                 .group("vmm-config"),
         )
         .arg(
-            Arg::with_name("monitor-fd")
-                .long("monitor-fd")
-                .help("File descriptor to report events on")
+            Arg::with_name("event-monitor")
+                .long("event-monitor")
+                .help("File to report events on: path=</path/to/a/file> or fd=<fd>")
                 .takes_value(true)
                 .min_values(1)
                 .group("vmm-config"),
@@ -352,6 +353,17 @@ fn create_app<'a, 'b>(
                 .help(config::SgxEpcConfig::SYNTAX)
                 .takes_value(true)
                 .min_values(1)
+                .group("vm-config"),
+        );
+    }
+
+    #[cfg(feature = "tdx")]
+    {
+        app = app.arg(
+            Arg::with_name("tdx")
+                .long("tdx")
+                .help("TDX Support: firmware=<tdvf path>")
+                .takes_value(true)
                 .group("vm-config"),
         );
     }
@@ -418,7 +430,7 @@ fn start_vmm(cmd_arguments: ArgMatches, api_socket_path: &str) -> Result<(), Err
 
     // Can't test for "vm-config" group as some have default values. The kernel
     // is the only required option for booting the VM.
-    if cmd_arguments.is_present("kernel") {
+    if cmd_arguments.is_present("kernel") || cmd_arguments.is_present("tdx") {
         let vm_params = config::VmParams::from_arg_matches(&cmd_arguments);
         let vm_config = config::VmConfig::parse(vm_params).map_err(Error::ParsingConfig)?;
 
@@ -516,11 +528,28 @@ fn main() {
         .expect("Missing argument: api-socket")
         .to_string();
 
-    if let Some(fd) = cmd_arguments
-        .value_of("monitor-fd")
-        .map(|s| s.parse::<i32>().expect("Expect integral file descriptor"))
-    {
-        let file = unsafe { File::from_raw_fd(fd) };
+    if let Some(monitor_config) = cmd_arguments.value_of("event-monitor") {
+        let mut parser = OptionParser::new();
+        parser.add("path").add("fd");
+        parser
+            .parse(monitor_config)
+            .expect("Error parsing event monitor config");
+
+        let file = if parser.is_set("fd") {
+            let fd = parser
+                .convert("fd")
+                .expect("Integral file descriptor expected")
+                .unwrap();
+            unsafe { File::from_raw_fd(fd) }
+        } else if parser.is_set("path") {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(parser.get("path").unwrap())
+                .expect("Error opening event monitor path")
+        } else {
+            panic!("--event-monitor requires either a fd or path provided")
+        };
         event_monitor::set_monitor(file).expect("Expected setting monitor to succeed");
     }
 
@@ -646,6 +675,8 @@ mod unit_tests {
                 sgx_epc: None,
                 numa: None,
                 watchdog: false,
+                #[cfg(feature = "tdx")]
+                tdx: None,
             };
 
             aver_eq!(tb, expected_vm_config, result_vm_config);
